@@ -64,28 +64,6 @@ sudo ./uninstall.sh               # 卸载（保留数据）
 sudo ./uninstall.sh --purge       # 卸载并清除审计/备份
 ```
 
-## 本地开发（mock 模式）
-
-Windows/macOS 上不碰真实系统，用内置 mock 数据完整体验全部页面与计划流：
-
-```bash
-cargo run -- serve --mock --bind 127.0.0.1 --port 8090 --data-dir ./routedeck-data
-```
-
-Live 模式（真实执行 nmcli/nft，需要 Linux + root）：
-
-```bash
-cargo run -- serve --bind 0.0.0.0 --port 8080 --data-dir /var/lib/routedeck
-```
-
-## 交叉编译（Windows → Linux musl 静态）
-
-```bash
-# 依赖：cargo-zigbuild + zig（PATH 中的 zig.exe）+ rustup target x86_64-unknown-linux-musl
-cargo zigbuild --release --target x86_64-unknown-linux-musl
-# 产物：target/x86_64-unknown-linux-musl/release/routedeck（静态链接，Debian 直接可跑）
-```
-
 ## CLI
 
 ```bash
