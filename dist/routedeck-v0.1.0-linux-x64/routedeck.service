@@ -1,0 +1,26 @@
+[Unit]
+Description=RouteDeck — non-invasive router WebUI (read-detect, plan/confirm/apply)
+Documentation=https://github.com/yourname/routedeck
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/routedeck/routedeck serve --bind 0.0.0.0 --port 8080 --data-dir /var/lib/routedeck
+Restart=on-failure
+RestartSec=3
+# 资源限制：面板自身不吃资源
+MemoryMax=128M
+TasksMax=64
+
+# 安全加固：RouteDeck 只在需要时以 root 执行 nmcli/nft 等命令，
+# 服务进程本身不需要写系统目录（除 data-dir 与受控的 /etc 变更）。
+NoNewPrivileges=false
+ProtectHome=true
+PrivateTmp=true
+
+# 审计与备份都落在 data-dir
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=multi-user.target

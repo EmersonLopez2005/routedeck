@@ -1,0 +1,20 @@
+# Rust build artifacts
+/target/
+
+# local runtime data (audit logs, backups, token)
+/routedeck-data/
+*.token
+
+# packaging output (zip is rebuilt by release)
+/dist/*.zip
+
+# workspace metadata & local memory
+/.workbuddy/
+
+# editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+/.cache/
