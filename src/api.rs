@@ -269,6 +269,15 @@ async fn h_packages(Query(q): Query<HashMap<String, String>>, State(state): Stat
     Json(v).into_response()
 }
 
+async fn h_update_check(State(state): State<Shared>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Response {
+    if let Err(r) = check(&state, &headers, &q.get("token").cloned()) {
+        return r;
+    }
+    let mode = state.mode;
+    let v = blocking(move || discovery::update::check(mode)).await;
+    Json(v).into_response()
+}
+
 async fn h_system(State(state): State<Shared>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Response {
     if let Err(r) = check(&state, &headers, &q.get("token").cloned()) {
         return r;
@@ -416,6 +425,7 @@ pub fn app(state: Shared) -> Router {
         .route("/api/dhcp", get(h_dhcp))
         .route("/api/services", get(h_services))
         .route("/api/system", get(h_system))
+        .route("/api/update/check", get(h_update_check))
         .route("/api/docker", get(h_docker))
         .route("/api/packages", get(h_packages))
         .route("/api/audit", get(h_audit))

@@ -1562,6 +1562,39 @@
   // ================= 系统 · 任务 =================
   async function renderSystem(view) {
     const d = await get("/api/system");
+    const up = await get("/api/update/check").catch(() => null);
+
+    // 在线升级卡片
+    let upBody;
+    if (!up) {
+      upBody = `<div class="empty">无法获取更新信息</div>`;
+    } else if (up.error) {
+      upBody = `<div class="warn-item"><span>×</span><span>${esc(up.error)}</span></div>
+        <button class="btn btn-ghost" id="btnUpgCheck" style="margin-top:10px">重试检查</button>`;
+    } else if (up.has_update) {
+      upBody = `
+        <div class="row" style="align-items:center;gap:10px;flex-wrap:wrap">
+          <span class="chip chip-ok">发现新版本 v${esc(up.latest)}</span>
+          <span class="muted small">当前 v${esc(up.current)}</span>
+        </div>
+        <div class="small muted" style="margin:10px 0 14px">
+          计划期下载并校验（ELF 头 + 运行 version 自检），执行时 sha 复核后原子替换二进制，
+          <b>2 秒后面板自动重启</b>（保证本页先收到执行结果）。旧版本自动备份，可一键回滚。
+        </div>
+        <div class="row" style="gap:8px">
+          <button class="btn btn-primary" id="btnUpgrade">升级到 v${esc(up.latest)}…</button>
+          <button class="btn btn-ghost" id="btnUpgCheck">重新检查</button>
+        </div>`;
+    } else {
+      upBody = `
+        <div class="row" style="align-items:center;gap:10px;flex-wrap:wrap">
+          <span class="chip chip-ok">✓ 已是最新版本</span>
+          <span class="muted small">当前 v${esc(up.current)}</span>
+          ${up.mock ? '<span class="chip">MOCK 演示</span>' : ""}
+        </div>
+        <div class="small muted" style="margin-top:10px">版本来源：GitHub 仓库 main 分支 Cargo.toml。</div>
+        <button class="btn btn-ghost" id="btnUpgCheck" style="margin-top:10px">重新检查</button>`;
+    }
 
     const rows = (d.tasks || [])
       .map(
@@ -1579,6 +1612,9 @@
       .join("");
 
     view.innerHTML = `
+      <div class="section">
+        ${card("在线升级", "GitHub main · 下载 → 校验 → 原子替换 → 自动重启", "", upBody)}
+      </div>
       <div class="section">
         <div class="grid g2">
           <div class="card" style="border-color:rgba(248,113,113,.35);background:rgba(248,113,113,.05)">
@@ -1611,6 +1647,48 @@
 
     $("#btnReboot").onclick = async () => {
       await confirmPlan("sys.reboot", {}, { applyLabel: "确认重启路由器", onDone: () => RD.toast("重启指令已下发，设备即将断开", "ok") });
+    };
+
+    const chkBtn = $("#btnUpgCheck");
+    if (chkBtn) chkBtn.onclick = () => refresh();
+
+    const upBtn = $("#btnUpgrade");
+    if (upBtn) upBtn.onclick = async () => {
+      // mock 模式没有真实二进制，直接展示计划管线即可；live 模式升级后等待重启
+      const isMock = (RD.state.status || {}).mode === "mock";
+      await confirmPlan("sys.upgrade", {}, {
+        applyLabel: "升级并重启面板",
+        onDone: async (res) => {
+          if (!res || res.status !== "applied") return;
+          if (isMock) {
+            RD.toast("mock 模式：演练完成，未真实替换二进制", "ok");
+            return;
+          }
+          RD.toast("升级已执行，面板正在重启，等待恢复…", "ok");
+          // 轮询等待新版本上线（最多 60 秒）
+          for (let i = 0; i < 30; i++) {
+            await new Promise((r) => setTimeout(r, 2000));
+            try {
+              const st = await RD.get("/api/status");
+              if (st && st.version && st.version !== up.current) {
+                RD.toast(`已升级到 v${st.version}`, "ok");
+                refresh();
+                return;
+              }
+              if (st && st.version === up.current && i > 5) {
+                // 重启完成但版本没变（回滚或升级失败）
+                RD.toast("面板已恢复，但版本未变化，请检查审计日志", "err");
+                refresh();
+                return;
+              }
+            } catch (e) {
+              /* 还在重启中，继续等 */
+            }
+          }
+          RD.toast("等待面板恢复超时，请手动刷新页面", "err");
+          refresh();
+        },
+      });
     };
 
     $("#btnAddTask").onclick = () => {

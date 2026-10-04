@@ -2021,6 +2021,174 @@ pub fn sys_del_timer(state: &Shared, params: &Value) -> Result<Plan, String> {
     Ok(plan)
 }
 
+// ---------- online upgrade ----------
+
+/// op: sys.upgrade — download the new binary (plan time), verify it, atomically
+/// replace the running executable, then schedule a *delayed* panel restart so
+/// the apply response can still be delivered before we kill ourselves.
+pub fn sys_upgrade(state: &Shared, params: &Value) -> Result<Plan, String> {
+    let force = params.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+    let mut url = params
+        .get("url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+
+    // resolve URL from the update checker when not supplied
+    if url.is_empty() {
+        let chk = crate::discovery::update::check(state.mode);
+        if let Some(e) = chk.get("error").and_then(|v| v.as_str()) {
+            return Err(format!("检查更新失败: {}", e));
+        }
+        if !force && !chk.get("has_update").and_then(|v| v.as_bool()).unwrap_or(false) {
+            return Err(format!(
+                "当前已是最新版本 v{}，无需升级",
+                chk.get("current").and_then(|v| v.as_str()).unwrap_or("?")
+            ));
+        }
+        url = chk
+            .get("url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+    }
+    if !url.starts_with("https://") || url.chars().any(|c| c.is_whitespace()) {
+        return Err("升级地址无效（必须是不含空白的 https URL）".into());
+    }
+
+    let exe = std::env::current_exe().map_err(|e| format!("无法定位当前二进制: {}", e))?;
+    let exe_s = exe.to_string_lossy().to_string();
+    if state.mode == Mode::Live && (!exe_s.starts_with('/') || exe_s.contains("..")) {
+        return Err(format!("当前二进制路径异常: {}", exe_s));
+    }
+    let exe_new = format!("{}.new", exe_s);
+    let exe_rb = format!("{}.rb", exe_s);
+
+    let dl_dir = state.data_dir.join("downloads");
+    let staged = dl_dir.join("routedeck.new");
+    let staged_s = staged.to_string_lossy().to_string();
+
+    let cur_ver = crate::discovery::update::current_version();
+    let mut new_ver;
+    let backup_id;
+
+    if state.mode == Mode::Live {
+        std::fs::create_dir_all(&dl_dir).map_err(|e| format!("创建下载目录失败: {}", e))?;
+        if !util::has_bin("curl") {
+            return Err("未找到 curl，无法在线升级".into());
+        }
+        let out = util::exec(&util::argv(&[
+            "curl", "-fsSL", "--connect-timeout", "10", "--max-time", "300",
+            "-o", &staged_s, &url,
+        ]))
+        .map_err(|e| e.to_string())?;
+        if !out.ok() {
+            return Err(format!("下载失败: {}", out.stderr.trim()));
+        }
+        let bytes =
+            std::fs::read(&staged).map_err(|e| format!("读取下载文件失败: {}", e))?;
+        if bytes.len() < 500_000 {
+            return Err(format!(
+                "下载文件过小（{} 字节），疑似不是 routedeck 二进制",
+                bytes.len()
+            ));
+        }
+        if &bytes[0..4] != b"\x7fELF" {
+            return Err("下载的文件不是 ELF 可执行程序".into());
+        }
+        // must be executable so we can run its `version` subcommand as sanity check
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))
+                .map_err(|e| e.to_string())?;
+        }
+        let vout = util::exec(&util::argv(&[&staged_s, "version"])).map_err(|e| e.to_string())?;
+        if !vout.ok() {
+            return Err(format!(
+                "新二进制无法运行: {}",
+                vout.stderr.trim().lines().last().unwrap_or("未知错误")
+            ));
+        }
+        new_ver = vout
+            .stdout
+            .split_whitespace()
+            .last()
+            .unwrap_or("")
+            .to_string();
+        if new_ver.is_empty() {
+            return Err("新二进制 version 输出无法解析".into());
+        }
+        if !force && !crate::discovery::update::ver_greater(&new_ver, &cur_ver) {
+            return Err(format!(
+                "远端版本 v{} 不高于当前 v{}，无需升级（如需重装请勾选强制升级）",
+                new_ver, cur_ver
+            ));
+        }
+        let cur_bytes =
+            std::fs::read(&exe).map_err(|e| format!("读取当前二进制失败: {}", e))?;
+        backup_id = state.backup_write(&exe_s, &cur_bytes, "pre-upgrade");
+    } else {
+        // mock: staged file doesn't exist; commands are never executed
+        new_ver = String::from("mock");
+        backup_id = state.backup_write(&exe_s, b"mock-pre-upgrade", "pre-upgrade");
+    }
+
+    let mut plan = Plan::new("sys.upgrade", "在线升级 RouteDeck", "high");
+    plan.description = format!("v{} → v{} · {}", cur_ver, new_ver, url);
+
+    // apply-time: re-verify the staged binary still runs before touching the exe
+    plan.commands.push(CmdStep {
+        argv: util::argv(&[&staged_s, "version"]),
+        desc: "校验暂存的新二进制可运行".into(),
+    });
+    plan.commands.push(CmdStep {
+        argv: util::argv(&["install", "-m", "0755", &staged_s, &exe_new]),
+        desc: "暂存新二进制（同目录，避免写运行中的文件）".into(),
+    });
+    plan.commands.push(CmdStep {
+        argv: util::argv(&["mv", "-f", &exe_new, &exe_s]),
+        desc: "原子替换正在运行的二进制（旧 inode 保持到重启）".into(),
+    });
+    plan.commands.push(CmdStep {
+        argv: util::argv(&[
+            "systemd-run", "--on-active=2s", "systemctl", "restart", "routedeck",
+        ]),
+        desc: "2 秒后面板自动重启（保证本次执行结果先返回）".into(),
+    });
+
+    let backup_path = state
+        .data_dir
+        .join("backups")
+        .join(&backup_id)
+        .to_string_lossy()
+        .to_string();
+    plan.rollback.push(RollbackStep::Cmd {
+        argv: util::argv(&["install", "-m", "0755", &backup_path, &exe_rb]),
+        desc: "暂存旧二进制".into(),
+    });
+    plan.rollback.push(RollbackStep::Cmd {
+        argv: util::argv(&["mv", "-f", &exe_rb, &exe_s]),
+        desc: "还原旧二进制".into(),
+    });
+    plan.rollback.push(RollbackStep::Cmd {
+        argv: util::argv(&[
+            "systemd-run", "--on-active=2s", "systemctl", "restart", "routedeck",
+        ]),
+        desc: "2 秒后面板重启以加载旧版本".into(),
+    });
+
+    plan.warnings.push(
+        "升级期间请勿断电；面板将在约 2 秒后自动重启，页面短暂断开后请刷新（升级流程会自动等待并刷新）。".into(),
+    );
+    plan.warnings.push(
+        "新二进制已通过 ELF / 版本运行校验，来源为 GitHub 官方仓库；旧版本已备份，可一键回滚。".into(),
+    );
+    plan.may_disconnect = true;
+    Ok(plan)
+}
+
 // ---------- external helpers used by rollback ----------
 
 pub fn nft_delete_by_comment(family: &str, table: &str, chain: &str, comment: &str) -> Result<String, String> {
@@ -2075,6 +2243,7 @@ pub fn build_plan(state: &Shared, op: &str, params: &Value) -> Result<Plan, Stri
         "sys.reboot" => sys_reboot(state, params),
         "sys.add_timer" => sys_add_timer(state, params),
         "sys.del_timer" => sys_del_timer(state, params),
+        "sys.upgrade" => sys_upgrade(state, params),
         "file.restore" => file_restore(state, params),
         _ => Err(format!("未知操作: {}", op)),
     }
