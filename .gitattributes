@@ -1,0 +1,2 @@
+# keep shell scripts executable and LF everywhere
+*.sh text eol=lf
