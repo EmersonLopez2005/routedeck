@@ -1812,6 +1812,215 @@ pub fn file_restore(state: &Shared, params: &Value) -> Result<Plan, String> {
     Ok(plan)
 }
 
+// ---------- system: reboot & scheduled tasks ----------
+
+/// op: sys.reboot — reboot the machine now.
+pub fn sys_reboot(_state: &Shared, _params: &Value) -> Result<Plan, String> {
+    let mut plan = Plan::new("sys.reboot", "立即重启路由器", "high");
+    plan.description = "systemctl reboot — 所有连接与服务将中断，约 1 分钟后恢复".into();
+    plan.commands.push(CmdStep {
+        argv: util::argv(&["systemctl", "reboot"]),
+        desc: "重启系统".into(),
+    });
+    plan.warnings.push(
+        "重启期间 WebUI / SSH / 全部网络中断；确认设备重启后能自动恢复联网再执行。".into(),
+    );
+    plan.may_disconnect = true;
+    Ok(plan)
+}
+
+/// Render the systemd oneshot service unit for a RouteDeck task.
+fn task_service_unit(name: &str, exec: &str) -> String {
+    format!(
+        "[Unit]\nDescription=RouteDeck task: {}\n\n[Service]\nType=oneshot\nExecStart={}\n",
+        name, exec
+    )
+}
+
+/// Render the systemd timer unit for a RouteDeck task.
+fn task_timer_unit(name: &str, on_calendar: &str) -> String {
+    format!(
+        "[Unit]\nDescription=RouteDeck timer: {}\n\n[Timer]\nOnCalendar={}\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n",
+        name, on_calendar
+    )
+}
+
+/// op: sys.add_timer — create routedeck-task-<name>.{service,timer} + enable --now.
+pub fn sys_add_timer(state: &Shared, params: &Value) -> Result<Plan, String> {
+    let name = p_str(params, "name")?;
+    if !valid_hostname(&name) {
+        return Err(format!("非法任务名（仅字母数字 _ -，≤63）: {}", name));
+    }
+    let kind = p_str(params, "kind").unwrap_or_else(|_| "reboot".into());
+    let on_calendar = p_str(params, "on_calendar")?;
+    if on_calendar.len() > 200 || on_calendar.contains('\n') {
+        return Err("OnCalendar 表达式过长或含换行".into());
+    }
+
+    let exec = match kind.as_str() {
+        "reboot" => "/usr/bin/systemctl reboot".to_string(),
+        "command" => {
+            let cmd = p_str(params, "command")?;
+            if !cmd.starts_with('/') {
+                return Err("命令必须是绝对路径（systemd 不经过 shell）例: /usr/bin/journalctl --vacuum-time=7d".into());
+            }
+            if cmd.len() > 400 || cmd.contains('\n') {
+                return Err("命令过长或含换行".into());
+            }
+            cmd
+        }
+        other => return Err(format!("未知任务类型: {}", other)),
+    };
+
+    let sp = crate::discovery::tasks::service_path(&name);
+    let tp = crate::discovery::tasks::timer_path(&name);
+    if state.mode == Mode::Mock {
+        let known = crate::discovery::tasks::tasks(Mode::Mock);
+        let exists = known["tasks"]
+            .as_array()
+            .map(|a| a.iter().any(|t| t["name"].as_str() == Some(name.as_str())))
+            .unwrap_or(false);
+        if exists {
+            return Err(format!("任务 {} 已存在，请先删除再创建", name));
+        }
+    } else {
+        if std::fs::metadata(&sp).is_ok() || std::fs::metadata(&tp).is_ok() {
+            return Err(format!("任务 {} 已存在，请先删除再创建", name));
+        }
+        let out = util::exec(&util::argv(&["systemd-analyze", "calendar", &on_calendar]))
+            .map_err(|e| e.to_string())?;
+        if !out.ok() {
+            return Err(format!("无效的 OnCalendar 表达式: {}", on_calendar));
+        }
+    }
+
+    let mut plan = Plan::new("sys.add_timer", &format!("新建定时任务 {}", name), "medium");
+    plan.description = format!("OnCalendar={} · ExecStart={}", on_calendar, exec);
+
+    plan.files.push(FileStep {
+        path: sp.clone(),
+        content: task_service_unit(&name, &exec),
+        expect_sha: None,
+        backup_id: None,
+        created: true,
+        desc: format!("写入 {}", sp),
+    });
+    plan.files.push(FileStep {
+        path: tp.clone(),
+        content: task_timer_unit(&name, &on_calendar),
+        expect_sha: None,
+        backup_id: None,
+        created: true,
+        desc: format!("写入 {}", tp),
+    });
+    plan.commands.push(CmdStep {
+        argv: util::argv(&["systemctl", "daemon-reload"]),
+        desc: "重新加载 systemd 单元".into(),
+    });
+    plan.commands.push(CmdStep {
+        argv: util::argv(&["systemctl", "enable", "--now", &crate::discovery::tasks::unit_name(&name)]),
+        desc: "启用并立即启动定时器".into(),
+    });
+
+    plan.rollback.push(RollbackStep::Cmd {
+        argv: util::argv(&["systemctl", "disable", "--now", &crate::discovery::tasks::unit_name(&name)]),
+        desc: "停用定时器".into(),
+    });
+    plan.rollback.push(RollbackStep::FileRestore {
+        path: sp.clone(),
+        backup_id: None,
+        desc: format!("删除 {}", sp),
+    });
+    plan.rollback.push(RollbackStep::FileRestore {
+        path: tp.clone(),
+        backup_id: None,
+        desc: format!("删除 {}", tp),
+    });
+    plan.rollback.push(RollbackStep::Cmd {
+        argv: util::argv(&["systemctl", "daemon-reload"]),
+        desc: "重新加载 systemd 单元".into(),
+    });
+
+    if kind == "reboot" {
+        plan.warnings.push("该任务到点将重启整机，所有连接中断。".into());
+        plan.risk = "high".into();
+    } else {
+        plan.warnings.push("命令以 root 权限周期执行，请确认内容可信。".into());
+    }
+    Ok(plan)
+}
+
+/// op: sys.del_timer — disable + remove a RouteDeck task (backed up for undo).
+pub fn sys_del_timer(state: &Shared, params: &Value) -> Result<Plan, String> {
+    let name = p_str(params, "name")?;
+    if !valid_hostname(&name) {
+        return Err(format!("非法任务名: {}", name));
+    }
+    let sp = crate::discovery::tasks::service_path(&name);
+    let tp = crate::discovery::tasks::timer_path(&name);
+    let unit = crate::discovery::tasks::unit_name(&name);
+
+    let (svc_content, tmr_content) = if state.mode == Mode::Mock {
+        let known = crate::discovery::tasks::tasks(Mode::Mock);
+        let exists = known["tasks"]
+            .as_array()
+            .map(|a| a.iter().any(|t| t["name"].as_str() == Some(name.as_str())))
+            .unwrap_or(false);
+        if !exists {
+            return Err(format!("任务不存在: {}", name));
+        }
+        (String::new(), String::new())
+    } else {
+        let s = std::fs::read_to_string(&sp).map_err(|_| format!("任务不存在: {}", name))?;
+        let t = std::fs::read_to_string(&tp).map_err(|_| format!("任务不存在: {}", name))?;
+        (s, t)
+    };
+    let (svc_backup, tmr_backup) = if state.mode == Mode::Mock {
+        (None, None)
+    } else {
+        (
+            Some(state.backup_write(&sp, svc_content.as_bytes(), "del-timer")),
+            Some(state.backup_write(&tp, tmr_content.as_bytes(), "del-timer")),
+        )
+    };
+
+    let mut plan = Plan::new("sys.del_timer", &format!("删除定时任务 {}", name), "medium");
+    plan.description = format!("disable {} + 删除两个单元文件（已备份可回滚）", unit);
+
+    plan.commands.push(CmdStep {
+        argv: util::argv(&["systemctl", "disable", "--now", &unit]),
+        desc: "停用并停止定时器".into(),
+    });
+    plan.commands.push(CmdStep {
+        argv: util::argv(&["/bin/rm", "-f", &sp, &tp]),
+        desc: "删除单元文件".into(),
+    });
+    plan.commands.push(CmdStep {
+        argv: util::argv(&["systemctl", "daemon-reload"]),
+        desc: "重新加载 systemd 单元".into(),
+    });
+
+    plan.rollback.push(RollbackStep::FileRestore {
+        path: sp.clone(),
+        backup_id: svc_backup,
+        desc: format!("还原 {}", sp),
+    });
+    plan.rollback.push(RollbackStep::FileRestore {
+        path: tp.clone(),
+        backup_id: tmr_backup,
+        desc: format!("还原 {}", tp),
+    });
+    plan.rollback.push(RollbackStep::Cmd {
+        argv: util::argv(&["systemctl", "daemon-reload"]),
+        desc: "重新加载 systemd 单元".into(),
+    });
+    plan.rollback.push(RollbackStep::Cmd {
+        argv: util::argv(&["systemctl", "enable", "--now", &unit]),
+        desc: "重新启用定时器".into(),
+    });
+    Ok(plan)
+}
+
 // ---------- external helpers used by rollback ----------
 
 pub fn nft_delete_by_comment(family: &str, table: &str, chain: &str, comment: &str) -> Result<String, String> {
@@ -1863,6 +2072,9 @@ pub fn build_plan(state: &Shared, op: &str, params: &Value) -> Result<Plan, Stri
         "dnsmasq.set_upstreams" => dnsmasq_set_upstreams(state, params),
         "dnsmasq.set_scope" => dnsmasq_set_scope(state, params),
         "dnsmasq.set_hosts" => dnsmasq_set_hosts(state, params),
+        "sys.reboot" => sys_reboot(state, params),
+        "sys.add_timer" => sys_add_timer(state, params),
+        "sys.del_timer" => sys_del_timer(state, params),
         "file.restore" => file_restore(state, params),
         _ => Err(format!("未知操作: {}", op)),
     }

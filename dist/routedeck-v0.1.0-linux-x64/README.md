@@ -22,14 +22,15 @@ RouteDeck 面向已经跑着 Debian（13 trixie 等）+ NetworkManager/nftables/
 
 | 域 | 内容 |
 |---|---|
-| 总览 | CPU/内存/流量、健康度、接口速览、已识别 WebUI 项目 |
-| 接口 | 实时检测网卡（enp1s0/ens1p0…，**不硬编码**）、NM 连接配置 IP、启用/停用、MTU/克隆 MAC |
+| 总览 | CPU/内存/流量、健康度、接口速览、**访问入口（LAN 地址优先展示）**、已识别 WebUI 项目 |
+| 接口 | 实时检测网卡（enp1s0/ens1p0…，**不硬编码**）、NM 连接配置 IP、启用/停用、MTU/克隆 MAC、**创建以太网（LAN 口/DHCP WAN）**、**换绑网卡（WAN/LAN 角色互换）** |
 | PPPoE | 创建/编辑拨号（账号/密码/ISP 服务名/ppp.mtu）、断线重拨 |
 | 双 WAN | route-metric 出口优先级、never-default |
 | 路由 | 内核路由表/策略规则只读、添加/删除静态路由 |
 | NAT/防火墙 | 托管端口转发（DNAT）、追加放行、MASQUERADE 按出口开关、DMZ |
 | DHCP/DNS | 作用域+下发选项、静态绑定、本地域名解析、上游 DNS；NM ICS/其它 dhcp-range 冲突检测（ICS 在管 → 硬拒绝） |
-| 服务/软件 | 监听端口、systemd、Docker 容器/Compose 项目、dpkg 软件 |
+| 服务/软件 | **软件入口（识别青龙/Grafana 等已装软件，一键打开 WebUI）**、监听端口、systemd、Docker 容器/Compose 项目、dpkg 软件 |
+| 系统/任务 | **立即重启**、**systemd 定时任务**（定时重启/定时命令，OnCalendar 校验，写入前备份、可回滚） |
 | 审计 | 变更历史、文件备份、一键还原 |
 
 托管写入均带 `rd:` 标记，只增删自己的对象：
@@ -38,40 +39,30 @@ RouteDeck 面向已经跑着 Debian（13 trixie 等）+ NetworkManager/nftables/
 
 ## 安装（Debian 路由器）
 
+**方式 A：克隆仓库一键安装（推荐测试）**
+
+```bash
+git clone https://github.com/EmersonLopez2005/routedeck.git
+cd routedeck/dist/routedeck-v0.1.0-linux-x64
+sudo ./install.sh
+```
+
+**方式 B：release zip**
+
 ```bash
 # 从 release zip 解压后
 sudo ./install.sh                 # 默认端口 8080
 sudo RD_PORT=9090 ./install.sh    # 自定义端口
 ```
 
-打开 `http://<路由器IP>:8080/`，首屏是只读检测报告。
+安装完成后会直接打印 **LAN 口访问入口**（`http://<LAN IP>:8080/`），面板总览页也有「访问入口」条。
+
+> 截图（mock 模式）：[总览页](dist/ui-overview.png) · [接口页](dist/ui-interfaces.png) · [DHCP](dist/ui-dhcp.png) · [NAT](dist/ui-nat.png) · [服务·软件入口](dist/ui-services.png) · [系统·任务](dist/ui-system.png)
 
 ```bash
 journalctl -u routedeck -f        # 日志
 sudo ./uninstall.sh               # 卸载（保留数据）
 sudo ./uninstall.sh --purge       # 卸载并清除审计/备份
-```
-
-## 本地开发（mock 模式）
-
-Windows/macOS 上不碰真实系统，用内置 mock 数据完整体验全部页面与计划流：
-
-```bash
-cargo run -- serve --mock --bind 127.0.0.1 --port 8090 --data-dir ./routedeck-data
-```
-
-Live 模式（真实执行 nmcli/nft，需要 Linux + root）：
-
-```bash
-cargo run -- serve --bind 0.0.0.0 --port 8080 --data-dir /var/lib/routedeck
-```
-
-## 交叉编译（Windows → Linux musl 静态）
-
-```bash
-# 依赖：cargo-zigbuild + zig（PATH 中的 zig.exe）+ rustup target x86_64-unknown-linux-musl
-cargo zigbuild --release --target x86_64-unknown-linux-musl
-# 产物：target/x86_64-unknown-linux-musl/release/routedeck（静态链接，Debian 直接可跑）
 ```
 
 ## CLI

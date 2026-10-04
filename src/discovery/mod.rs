@@ -11,6 +11,7 @@ pub mod net;
 pub mod nm;
 pub mod packages;
 pub mod services;
+pub mod tasks;
 
 use crate::state::Mode;
 use serde_json::{json, Value};

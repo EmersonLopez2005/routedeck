@@ -379,6 +379,16 @@ pub fn services() -> Value {
     })
 }
 
+pub fn tasks() -> Value {
+    json!({
+        "tasks": [
+            {"name": "daily-reboot", "kind": "reboot", "on_calendar": "*-*-* 03:30:00", "exec": "/usr/sbin/reboot", "unit": "routedeck-task-daily-reboot.timer", "enabled": "enabled", "active": "active", "next": "Tomorrow 03:30:00"},
+            {"name": "weekly-logclean", "kind": "command", "on_calendar": "Mon *-*-* 04:00:00", "exec": "/usr/bin/journalctl --vacuum-time=14d", "unit": "routedeck-task-weekly-logclean.timer", "enabled": "enabled", "active": "inactive", "next": "Mon 04:00:00"}
+        ],
+        "unit_dir": "/etc/systemd/system"
+    })
+}
+
 pub fn docker() -> Value {
     json!({
         "present": true,

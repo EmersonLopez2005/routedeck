@@ -1203,7 +1203,118 @@
   }
 
   // ================= 服务 · 软件 · Docker =================
-  let svcTab = "listen";
+  let svcTab = "apps";
+
+  // 常见软件识别：进程名/容器名 → 显示名
+  const KNOWN_APPS = {
+    qinglong: "青龙面板",
+    openclash: "OpenClash",
+    grafana: "Grafana",
+    prometheus: "Prometheus",
+    "uptime-kuma": "Uptime Kuma",
+    portainer: "Portainer",
+    homer: "Homer",
+    nginx: "Nginx",
+    caddy: "Caddy",
+    pihole: "Pi-hole",
+    "pihole-ftl": "Pi-hole",
+    transmission: "Transmission",
+    qbittorrent: "qBittorrent",
+    jellyfin: "Jellyfin",
+    emby: "Emby",
+    navidrome: "Navidrome",
+    homeassistant: "Home Assistant",
+    "home assistant": "Home Assistant",
+    frps: "FRP 服务端",
+    frpc: "FRP 客户端",
+    tailscale: "Tailscale",
+    syncthing: "Syncthing",
+    minio: "MinIO",
+    gitlab: "GitLab",
+    gitea: "Gitea",
+    nextcloud: "Nextcloud",
+    vaultwarden: "Vaultwarden",
+    umami: "Umami",
+    uptime: "Uptime",
+    adguardhome: "AdGuard Home",
+    node: "Node 服务",
+    python3: "Python 服务",
+    python: "Python 服务",
+  };
+
+  // 从 `0.0.0.0:5700->5700/tcp` 里取宿主端口
+  function dockerHostPort(ports) {
+    if (!ports) return null;
+    for (const part of String(ports).split(",")) {
+      const m = part.match(/:(\d+)->/);
+      if (m) return Number(m[1]);
+    }
+    const m2 = String(ports).match(/^(\d+)\/tcp$/);
+    return m2 ? Number(m2[1]) : null;
+  }
+
+  function drawApps(root, svc, docker) {
+    const entries = new Map(); // port -> entry
+    const add = (port, name, source, detail) => {
+      if (!port || port < 1 || port > 65535) return;
+      const prev = entries.get(port);
+      if (prev) {
+        if (prev.source !== source) prev.detail = prev.detail + " · " + detail;
+        return;
+      }
+      entries.set(port, {
+        port,
+        name: KNOWN_APPS[String(name).toLowerCase()] || name,
+        known: !!KNOWN_APPS[String(name).toLowerCase()],
+        source,
+        detail,
+      });
+    };
+
+    for (const l of svc.web_listeners || []) {
+      const m = String(l.local).match(/:(\d+)$/);
+      if (m) add(Number(m[1]), l.process || "web", "proc", l.local);
+    }
+    if (docker.present) {
+      for (const c of docker.containers || []) {
+        if (c.state !== "running") continue;
+        const p = dockerHostPort(c.ports);
+        if (p) add(p, c.names, "docker", c.image || "");
+      }
+    }
+
+    const items = [...entries.values()].sort((a, b) => a.port - b.port);
+    const cards = items
+      .map((e) => {
+        const loopback = e.detail.startsWith("127.");
+        const href = `${location.protocol}//${location.hostname}:${e.port}/`;
+        const src = e.source === "docker" ? '<span class="chip chip-info">Docker</span>' : '<span class="chip chip-cat">进程</span>';
+        return `<div class="card" style="padding:14px 16px">
+          <div class="row" style="align-items:center">
+            <div>
+              <div style="font-weight:600">${esc(e.name)} ${e.known ? "" : '<span class="chip">未识别</span>'}</div>
+              <div class="muted small mono" style="margin-top:4px">:${e.port} · ${esc(e.detail)} ${src}</div>
+            </div>
+            <span class="spacer"></span>
+            ${loopback ? '<span class="chip chip-warn">仅本机监听</span>' : `<a class="btn btn-primary btn-sm" href="${esc(href)}" target="_blank" rel="noopener">打开 ↗</a>`}
+          </div>
+        </div>`;
+      })
+      .join("");
+
+    root.innerHTML = `<div class="section">
+      ${card("软件入口", `识别到 ${items.length} 个 Web 入口 · 点击直接在新标签打开`,
+        `<span class="muted small">地址使用当前访问域名 + 端口</span>`,
+        items.length
+          ? `<div class="grid g2" style="gap:12px">${cards}</div>`
+          : `<div class="empty">未扫描到 Web 入口</div>`)}
+    </div>
+    <div class="section">
+      ${card("识别依据", "", "",
+        `<div class="small muted">来自 <span class="mono">ss</span> 的 Web 监听进程与 Docker 容器端口映射；常见软件（青龙 / OpenClash / Grafana 等）自动显示中文名，其它显示进程名。仅绑定 127.0.0.1 的入口外部无法访问，已标注。</div>`)}
+    </div>`;
+  }
+
   async function renderServices(view) {
     const [svc, docker, pkgs] = await Promise.all([
       get("/api/services"),
@@ -1212,6 +1323,7 @@
     ]);
 
     const tabs = [
+      ["apps", "软件入口"],
       ["listen", "监听端口"],
       ["units", "systemd 服务"],
       ["docker", "Docker"],
@@ -1224,7 +1336,8 @@
 
     const body = $("#svcBody");
     const draw = () => {
-      if (svcTab === "listen") drawListen(body, svc);
+      if (svcTab === "apps") drawApps(body, svc, docker);
+      else if (svcTab === "listen") drawListen(body, svc);
       else if (svcTab === "units") drawUnits(body, svc);
       else if (svcTab === "docker") drawDocker(body, docker);
       else drawPackages(body, pkgs);
@@ -1446,6 +1559,117 @@
       </div>`;
   }
 
+  // ================= 系统 · 任务 =================
+  async function renderSystem(view) {
+    const d = await get("/api/system");
+
+    const rows = (d.tasks || [])
+      .map(
+        (t) => `<tr>
+        <td><b>${esc(t.name)}</b>
+          <span class="chip ${t.kind === "reboot" ? "chip-warn" : "chip-info"}">${t.kind === "reboot" ? "定时重启" : "定时命令"}</span></td>
+        <td class="mono small">${esc(t.on_calendar)}</td>
+        <td class="mono small truncate" title="${esc(t.exec)}">${esc(t.exec)}</td>
+        <td class="mono small muted">${esc(t.next || "—")}</td>
+        <td><span class="st ${t.enabled === "enabled" ? "on" : "off"}"></span>${esc(t.enabled)}</td>
+        <td><span class="st ${t.active === "active" ? "on" : "off"}"></span>${esc(t.active)}</td>
+        <td class="right"><button class="btn btn-sm btn-danger" data-deltask="${esc(t.name)}">删除</button></td>
+      </tr>`
+      )
+      .join("");
+
+    view.innerHTML = `
+      <div class="section">
+        <div class="grid g2">
+          <div class="card" style="border-color:rgba(248,113,113,.35);background:rgba(248,113,113,.05)">
+            <div class="card-t" style="color:#f87171">⚠ 立即重启路由器</div>
+            <div class="small muted" style="margin:8px 0 14px">执行 <span class="mono">systemctl reboot</span>。重启期间 WebUI / SSH / 全部网络中断，约 1 分钟后恢复——请确认设备重启后能自动联网。</div>
+            <button class="btn btn-danger" id="btnReboot">立即重启…</button>
+          </div>
+          <div class="card">
+            <div class="card-t">定时任务如何工作</div>
+            <div class="small muted" style="margin-top:8px">
+              每个任务写入两个 systemd 单元（<span class="mono">/etc/systemd/system/routedeck-task-&lt;名&gt;.service/.timer</span>），
+              走和其它操作一样的 Plan → 确认 → Apply 管线：写入前自动备份，删除可回滚。
+              到点由 systemd 触发，不依赖 WebUI 是否在线。
+            </div>
+            <div class="kv" style="margin-top:10px">
+              <span class="k">单元目录</span><span class="v mono">${esc(d.unit_dir || "/etc/systemd/system")}</span>
+              <span class="k">任务数</span><span class="v">${(d.tasks || []).length}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="section">
+        ${card("定时任务", `systemctl list-timers · routedeck-task-*`,
+          `<button class="btn btn-primary" id="btnAddTask">＋ 新建定时任务</button>`,
+          table(
+            [{ t: "任务" }, { t: "OnCalendar" }, { t: "执行命令" }, { t: "下次运行" }, { t: "启用" }, { t: "活动" }, { cls: "right", t: "" }],
+            rows
+          ))}
+      </div>`;
+
+    $("#btnReboot").onclick = async () => {
+      await confirmPlan("sys.reboot", {}, { applyLabel: "确认重启路由器", onDone: () => RD.toast("重启指令已下发，设备即将断开", "ok") });
+    };
+
+    $("#btnAddTask").onclick = () => {
+      modal(`
+        ${modalHead("新建定时任务")}
+        <div class="m-body"><div class="form">
+          <div class="f-grid2">
+            <div class="f-row"><label>任务名（字母数字 _ -）</label><input id="tkName" placeholder="daily-reboot"></div>
+            <div class="f-row"><label>类型</label>
+              <select id="tkKind">
+                <option value="reboot">定时重启</option>
+                <option value="command">定时命令</option>
+              </select></div>
+          </div>
+          <div class="f-row"><label>OnCalendar（systemd 时间表达式）</label>
+            <input id="tkCal" placeholder="*-*-* 03:30:00" value="*-*-* 03:30:00">
+            <datalist id="tkCalList">
+              <option value="*-*-* 03:30:00">每天 03:30</option>
+              <option value="Mon *-*-* 04:00:00">每周一 04:00</option>
+              <option value="*-*-* 02/6:00:00">每 6 小时</option>
+            </datalist>
+          </div>
+          <div class="f-row" id="tkCmdRow" style="display:none">
+            <label>执行命令（绝对路径，systemd 不经 shell）</label>
+            <input id="tkCmd" placeholder="/usr/bin/journalctl --vacuum-time=14d">
+          </div>
+          <div class="warn-item"><span>ⓘ</span><span>生成计划时会用 <span class="mono">systemd-analyze calendar</span> 校验时间表达式；执行时写入单元文件并 <span class="mono">enable --now</span>。</span></div>
+        </div></div>
+        <div class="m-foot">
+          <button class="btn btn-ghost" onclick="RD.closeModal()">取消</button>
+          <button class="btn btn-primary" id="tkNext">生成变更计划</button>
+        </div>`);
+      const kindSel = $("#tkKind");
+      const syncKind = () => {
+        $("#tkCmdRow").style.display = kindSel.value === "command" ? "" : "none";
+        $("#tkCal").list = kindSel.value === "reboot" ? "tkCalList" : null;
+      };
+      kindSel.onchange = syncKind;
+      syncKind();
+      $("#tkNext").onclick = async () => {
+        const params = {
+          name: $("#tkName").value.trim(),
+          kind: $("#tkKind").value,
+          on_calendar: $("#tkCal").value.trim(),
+        };
+        if (params.kind === "command") params.command = $("#tkCmd").value.trim();
+        closeModal();
+        await confirmPlan("sys.add_timer", params, { onDone: refresh });
+      };
+    };
+
+    $$("#view button[data-deltask]").forEach((b) => {
+      b.onclick = async () => {
+        if (!confirm("删除定时任务 " + b.dataset.deltask + "？（单元文件先备份，可回滚）")) return;
+        await confirmPlan("sys.del_timer", { name: b.dataset.deltask }, { onDone: refresh });
+      };
+    });
+  }
+
   // ---------- register ----------
   RD.registerRoute("overview", { render: renderOverview, interval: 3000 });
   RD.registerRoute("interfaces", { render: renderInterfaces, interval: 15000 });
@@ -1455,4 +1679,5 @@
   RD.registerRoute("services", { render: renderServices });
   RD.registerRoute("audit", { render: renderAudit });
   RD.registerRoute("detection", { render: renderDetection });
+  RD.registerRoute("system", { render: renderSystem });
 })();

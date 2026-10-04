@@ -328,9 +328,10 @@
     routes: ["路由", "内核路由表与策略规则"],
     nat: ["NAT · 防火墙", "端口转发与转发放行（托管表 routedeck）"],
     dhcp: ["DHCP · DNS", "租约 / 静态绑定 / 上游解析"],
-    services: ["服务 · 软件", "监听端口 / systemd / Docker / 已装软件"],
+    services: ["服务 · 软件", "软件入口 / 监听端口 / systemd / Docker / 已装软件"],
     audit: ["审计 · 备份", "全部变更记录与文件快照"],
     detection: ["检测报告", "安装期只读识别结果"],
+    system: ["系统 · 任务", "立即重启 / systemd 定时任务"],
   };
 
   async function navigate() {
