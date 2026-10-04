@@ -116,6 +116,28 @@ async fn h_overview(State(state): State<Shared>, headers: HeaderMap, Query(q): Q
         }));
     }
 
+    // WebUI 入口候选：LAN 侧地址优先（up、非回环、非默认出口）
+    let mut lan_ips: Vec<String> = vec![];
+    let mut wan_ips: Vec<String> = vec![];
+    for i in &if_list {
+        if i["category"] == "loopback" || i["up"] != json!(true) {
+            continue;
+        }
+        let is_default = i["is_default"] == json!(true);
+        for a in i["addr4"].as_array().map(|v| v.iter()).into_iter().flatten() {
+            let Some(s) = a.as_str() else { continue };
+            let ip = s.split('/').next().unwrap_or("");
+            if ip.is_empty() || ip.starts_with("127.") {
+                continue;
+            }
+            if is_default {
+                wan_ips.push(ip.to_string());
+            } else {
+                lan_ips.push(ip.to_string());
+            }
+        }
+    }
+
     Json(json!({
         "host": host,
         "net": {"rx_bps": rx_bps, "tx_bps": tx_bps, "cpu_pct": cpu_pct},
@@ -124,16 +146,20 @@ async fn h_overview(State(state): State<Shared>, headers: HeaderMap, Query(q): Q
             "interfaces": if_list.len(),
             "routes": routes["routes"].as_array().map(|a| a.len()).unwrap_or(0),
             "docker_containers": docker["containers"].as_array().map(|a| a.len()).unwrap_or(0),
-            "docker_running": docker["running"],
-            "services_running": svc["running_count"],
+            "docker_running": docker["running"].as_u64().unwrap_or(0),
+            "services_running": svc["running_count"].as_u64().unwrap_or(0),
             "listeners": svc["listening"].as_array().map(|a| a.len()).unwrap_or(0),
-            "leases": dhcp["dnsmasq"]["lease_count"],
+            "leases": dhcp["dnsmasq"]["lease_count"].as_u64().unwrap_or(0),
             "web_apps": svc["web_listeners"].as_array().map(|a| a.len()).unwrap_or(0),
             "forwards": nat["nft"]["managed"]["rules"].as_array().map(|a| a.len()).unwrap_or(0),
         },
         "wan": {
             "default_dev": routes["default_dev"],
             "default_gw": routes["default_gw"],
+        },
+        "entry": {
+            "lan_ips": lan_ips,
+            "wan_ips": wan_ips,
         },
         "health": {
             "nft": nat["nft"]["present"],

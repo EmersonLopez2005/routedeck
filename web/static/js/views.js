@@ -18,7 +18,12 @@
     const body = Array.isArray(rows) ? rows.join("") : rows || "";
     if (!body) return `<div class="empty">暂无数据</div>`;
     return `<div style="overflow:auto"><table class="tb">
-      <thead><tr>${cols.map((c) => `<th class="${c.cls || ""}">${c.t || c}</th>`).join("")}</tr></thead>
+      <thead><tr>${cols
+        .map((c) => {
+          const title = typeof c === "string" ? c : c.t || "";
+          return `<th class="${(typeof c === "string" ? "" : c.cls) || ""}">${title}</th>`;
+        })
+        .join("")}</tr></thead>
       <tbody>${body}</tbody></table></div>`;
   };
 
@@ -86,8 +91,37 @@
         <div class="grid g4">
           ${stat("CPU", (ov.net.cpu_pct ?? 0).toFixed(0), "%", esc(ov.host.cpu_model || ""), cpuCls)}
           ${stat("内存", memPct, "%", `${fmtBytes(ov.host.mem_total_kb * 1024)} · 可用 ${fmtBytes(ov.host.mem_avail_kb * 1024)}`)}
-          ${stat("运行时间", fmtUptime(uptimeShort(ov.host.uptime_secs)), "", `负载 ${((ov.host.load || [])[0] ?? 0).toFixed(2)} / ${((ov.host.load || [])[1] ?? 0).toFixed(2)} / ${((ov.host.load || [])[2] ?? 0).toFixed(2)}`)}
+          ${stat("运行时间", fmtUptime(ov.host.uptime_secs), "", `负载 ${((ov.host.load || [])[0] ?? 0).toFixed(2)} / ${((ov.host.load || [])[1] ?? 0).toFixed(2)} / ${((ov.host.load || [])[2] ?? 0).toFixed(2)}`)}
           ${stat("默认出口", esc(wanUp ? wanUp.name : ov.wan.default_dev || "—"), "", `gw ${esc(ov.wan.default_gw || "—")}`)}
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="card pad-s">
+          <div class="row" style="flex-wrap:wrap;gap:8px">
+            <span class="chip chip-info">访问入口</span>
+            ${(() => {
+              const port = location.port ? ":" + location.port : "";
+              const lan = (ov.entry && ov.entry.lan_ips) || [];
+              const wan = (ov.entry && ov.entry.wan_ips) || [];
+              const chips = lan.map(
+                (ip) =>
+                  `<a class="chip mono" href="http://${esc(ip)}${port}/" target="_blank" rel="noopener" title="LAN 口地址，局域网内推荐使用">http://${esc(ip)}${port}/</a>`
+              );
+              const wchips = wan.map(
+                (ip) => `<span class="chip mono muted" title="WAN 口地址，仅公网/远程访问时使用">${esc(ip)}</span>`
+              );
+              return (
+                chips.join("") +
+                (wchips.length
+                  ? `<span class="muted small">WAN:</span>${wchips.join("")}`
+                  : "") +
+                (chips.length ? "" : '<span class="muted small">未检测到 LAN 侧 IPv4</span>')
+              );
+            })()}
+            <span class="spacer"></span>
+            <span class="muted small">局域网请用 LAN 地址访问；WAN 地址仅在远程管理时使用</span>
+          </div>
         </div>
       </div>
 
@@ -131,10 +165,6 @@
       spark($("#spkRx"), h.rx, "#22d3ee");
       spark($("#spkTx"), h.tx, "#818cf8");
     });
-  }
-
-  function uptimeShort(s) {
-    return s >= 86400 ? Math.floor(s / 86400) + "d" : s >= 3600 ? Math.floor(s / 3600) + "h" : Math.floor(s / 60) + "m";
   }
 
   // ================= 接口 =================
@@ -200,6 +230,7 @@
             <button class="btn btn-sm ${connected ? "btn-danger" : ""}" data-link="${esc(c.uuid)}" data-name="${esc(c.name)}" data-action="${connected ? "down" : "up"}">${connected ? "停用" : "启用"}</button>
             <button class="btn btn-sm btn-ghost" data-mtu="${esc(c.uuid)}" data-name="${esc(c.name)}">MTU/MAC</button>
             <button class="btn btn-sm btn-ghost" data-metric="${esc(c.uuid)}" data-name="${esc(c.name)}">优先级</button>
+            <button class="btn btn-sm btn-ghost" data-rebind="${esc(c.uuid)}" data-name="${esc(c.name)}">换绑网卡</button>
           </td>
         </tr>`;
       })
@@ -210,17 +241,22 @@
         <div class="row">${nmChip}<span class="chip">${esc((nm.nm || {}).version || "")}</span>
           <span class="chip">网卡 ${ifNames.length} 个（实时检测）</span><span class="spacer"></span>
           <button class="btn btn-primary btn-sm" id="btnCreatePppoe">＋ 创建 PPPoE</button>
+          <button class="btn btn-primary btn-sm" id="btnCreateEth">＋ 创建以太网</button>
           <span class="muted small">修改将生成计划 → 确认后执行（自动备份 / 可回滚）</span></div>
       </div>
       <div class="section"><div class="grid g-auto">${cards || '<div class="empty">无接口</div>'}</div></div>
       <div class="section">
-        ${card("NetworkManager 连接", "持久化网络配置 · 启停 / 拨号 / MTU / 出口优先级", "", table(
+        ${card("NetworkManager 连接", "持久化网络配置 · 启停 / 拨号 / MTU / 出口优先级 / 换绑网卡", "", table(
           [{ t: "名称" }, { t: "类型" }, { t: "设备" }, { t: "状态" }, { cls: "right", t: "操作" }],
           connRows
         ))}
       </div>`;
 
     $("#btnCreatePppoe").onclick = () => createPppoeForm(ifNames);
+    $("#btnCreateEth").onclick = () => createEthernetForm(ifNames);
+    $$("#view button[data-rebind]").forEach((b) => {
+      b.onclick = () => setIfnameForm(b.dataset.rebind, b.dataset.name, ifNames);
+    });
     $$("#view button[data-conn]").forEach((b) => {
       b.onclick = () => openConnForm(b.dataset.conn, b.dataset.name);
     });
@@ -246,6 +282,118 @@
     $$("#view button[data-metric]").forEach((b) => {
       b.onclick = () => setMetricForm(b.dataset.metric, b.dataset.name);
     });
+  }
+
+  // —— 以太网创建（LAN 口 / 第二条 WAN，DHCP 或静态） ——
+  function createEthernetForm(ifNames) {
+    const opts = (ifNames || []).map((n) => `<option value="${esc(n)}">`).join("");
+    modal(`
+      ${modalHead("创建以太网连接（LAN 口 / WAN 均可）")}
+      <div class="m-body">
+        <div class="form">
+          <div class="f-grid2">
+            <div class="f-row"><label>连接名</label><input id="etName" placeholder="LAN1 / WAN2-DHCP"></div>
+            <div class="f-row"><label>物理网卡</label>
+              <input id="etIf" list="etIfList" placeholder="如 enp2s0" required>
+              <datalist id="etIfList">${opts}</datalist>
+              <span class="hint">候选来自实时检测（ip -j link），非硬编码</span>
+            </div>
+          </div>
+          <div class="f-grid2">
+            <div class="f-row"><label>IPv4 获取方式</label>
+              <select id="etMethod">
+                <option value="auto">DHCP 自动获取</option>
+                <option value="manual">静态地址</option>
+              </select>
+            </div>
+            <div class="f-row"><label>出口优先级 metric（可选，1–9999）</label>
+              <input id="etMetric" type="number" min="1" max="9999" placeholder="留空=默认 100；备用 WAN 填 200">
+            </div>
+          </div>
+          <div id="etManualBox" style="display:none">
+            <div class="f-grid2">
+              <div class="f-row"><label>静态地址（CIDR，多个逗号分隔）</label><input id="etAddr" placeholder="192.168.1.1/24"></div>
+              <div class="f-row"><label>网关（可选）</label><input id="etGw" placeholder="192.168.1.254"></div>
+            </div>
+            <div class="f-row"><label>DNS（可选，逗号分隔）</label><input id="etDns" placeholder="223.5.5.5,119.29.29.29"></div>
+          </div>
+        </div>
+        <div class="warn-item danger"><span>⚠</span><span>新连接会立即占用所选网卡。LAN 口接交换机即可做内网；WAN 口请配合「优先级」与 NAT 页 MASQUERADE 组成多 WAN。</span></div>
+      </div>
+      <div class="m-foot">
+        <button class="btn btn-ghost" onclick="RD.closeModal()">取消</button>
+        <button class="btn btn-primary" id="etNext">生成变更计划</button>
+      </div>`);
+    $("#etMethod").onchange = () => {
+      $("#etManualBox").style.display = $("#etMethod").value === "manual" ? "" : "none";
+    };
+    $("#etNext").onclick = async () => {
+      const params = {
+        name: $("#etName").value.trim(),
+        ifname: $("#etIf").value.trim(),
+        method: $("#etMethod").value,
+      };
+      if (!params.name || !params.ifname) {
+        toast("连接名 / 网卡为必填", "err");
+        return;
+      }
+      const metric = $("#etMetric").value;
+      if (metric) params.metric = Number(metric);
+      if (params.method === "manual") {
+        const addr = $("#etAddr").value.trim();
+        if (!addr) {
+          toast("静态模式需填写地址", "err");
+          return;
+        }
+        params.addresses = addr.split(",").map((s) => s.trim()).filter(Boolean);
+        const gw = $("#etGw").value.trim();
+        if (gw) params.gateway = gw;
+        const dns = $("#etDns").value.trim();
+        if (dns) params.dns = dns.split(",").map((s) => s.trim()).filter(Boolean);
+      }
+      closeModal();
+      await confirmPlan("nm.create_ethernet", params, { onDone: refresh });
+    };
+  }
+
+  // —— 换绑网卡（WAN/LAN 角色互换） ——
+  async function setIfnameForm(uuid, name, ifNames) {
+    let keys = {};
+    try {
+      const d = await RD.get("/api/nm/connection/" + encodeURIComponent(uuid));
+      keys = (d && d.keys) || {};
+    } catch (e) { /* fall through */ }
+    const cur = keys["connection.interface-name"] || "";
+    const opts = (ifNames || []).map((n) => `<option value="${esc(n)}">`).join("");
+    modal(`
+      ${modalHead(`换绑网卡 · ${esc(name)}`)}
+      <div class="m-body">
+        <div class="form">
+          <div class="f-row"><label>目标物理网卡</label>
+            <input id="riIf" list="riIfList" value="${esc(cur)}" required>
+            <datalist id="riIfList">${opts}</datalist>
+            <span class="hint">当前绑定: ${esc(cur || "（未绑定）")} · 候选来自实时检测</span>
+          </div>
+        </div>
+        <div class="warn-item danger"><span>⚠</span><span>换绑 = WAN/LAN 角色互换：连接迁移到新网卡并重新激活。原网卡将失去此连接的配置，管理链路可能中断。</span></div>
+      </div>
+      <div class="m-foot">
+        <button class="btn btn-ghost" onclick="RD.closeModal()">取消</button>
+        <button class="btn btn-primary" id="riNext">生成变更计划</button>
+      </div>`);
+    $("#riNext").onclick = async () => {
+      const ifname = $("#riIf").value.trim();
+      if (!ifname) {
+        toast("目标网卡为必填", "err");
+        return;
+      }
+      if (ifname === cur) {
+        toast("目标网卡与当前绑定相同", "err");
+        return;
+      }
+      closeModal();
+      await confirmPlan("nm.set_ifname", { connection: uuid, ifname }, { onDone: refresh });
+    };
   }
 
   // —— PPPoE 创建（网卡候选来自实时检测） ——

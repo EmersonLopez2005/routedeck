@@ -711,6 +711,170 @@ pub fn nm_create_pppoe(state: &Shared, params: &Value) -> Result<Plan, String> {
     Ok(plan)
 }
 
+/// op: nm.create_ethernet — create an ethernet connection (LAN port or DHCP/static WAN).
+pub fn nm_create_ethernet(state: &Shared, params: &Value) -> Result<Plan, String> {
+    let name = p_str(params, "name")?;
+    if !valid_hostname(&name) {
+        return Err("连接名仅允许字母数字与 - _（如 LAN1 / WAN2-DHCP）".into());
+    }
+    let ifname = p_str(params, "ifname")?;
+    if !valid_ifname(&ifname) {
+        return Err(format!("非法接口名: {}", ifname));
+    }
+    let method = params
+        .get("method")
+        .and_then(|v| v.as_str())
+        .unwrap_or("auto")
+        .to_string();
+    if !["manual", "auto"].contains(&method.as_str()) {
+        return Err("method 必须是 manual 或 auto".into());
+    }
+    let addresses = p_str_arr(params, "addresses");
+    let gateway = params
+        .get("gateway")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let dns = p_str_arr(params, "dns");
+    let metric = params.get("metric").and_then(|v| v.as_u64());
+    if let Some(m) = metric {
+        if m == 0 || m > 9999 {
+            return Err("metric 必须在 1–9999".into());
+        }
+    }
+    if method == "manual" {
+        if addresses.is_empty() {
+            return Err("静态模式至少需要一个地址（CIDR，如 192.168.1.1/24）".into());
+        }
+        for a in &addresses {
+            if !valid_cidr(a) {
+                return Err(format!("非法地址: {}（应为 如 192.168.1.1/24）", a));
+            }
+        }
+        if !gateway.is_empty() && !valid_ipv4(&gateway) {
+            return Err(format!("非法网关: {}", gateway));
+        }
+    }
+    for d in &dns {
+        if !valid_ipv4(d) && !d.contains(':') {
+            return Err(format!("非法 DNS: {}", d));
+        }
+    }
+    let conns = nmd::connections(state.mode);
+    if conns.iter().any(|c| c["name"].as_str() == Some(name.as_str())) {
+        return Err(format!("同名连接已存在: {}", name));
+    }
+
+    let role = if method == "auto" { "DHCP" } else { "静态" };
+    let mut plan = Plan::new("nm.create_ethernet", "创建以太网连接", "high");
+    plan.description = format!("{} → {} ({})", name, ifname, role);
+    plan.risk = "high".into();
+
+    let mut argv = util::argv(&[
+        "nmcli", "connection", "add", "type", "ethernet",
+        "con-name", &name, "ifname", &ifname,
+        "ipv4.method", &method,
+    ]);
+    if method == "manual" {
+        argv.push("ipv4.addresses".into());
+        argv.push(addresses.join(","));
+        if !gateway.is_empty() {
+            argv.push("ipv4.gateway".into());
+            argv.push(gateway.clone());
+        }
+    }
+    if !dns.is_empty() {
+        argv.push("ipv4.dns".into());
+        argv.push(dns.join(","));
+    }
+    if let Some(m) = metric {
+        argv.push("ipv4.route-metric".into());
+        argv.push(m.to_string());
+    }
+    argv.push("connection.autoconnect".into());
+    argv.push("yes".into());
+    plan.commands.push(CmdStep {
+        argv,
+        desc: format!("创建以太网连接 {}", name),
+    });
+    plan.commands.push(CmdStep {
+        argv: util::argv(&["nmcli", "connection", "up", &name]),
+        desc: format!("激活 {}", name),
+    });
+    plan.rollback.push(RollbackStep::Cmd {
+        argv: util::argv(&["nmcli", "connection", "delete", &name]),
+        desc: format!("删除新建连接 {}", name),
+    });
+    plan.warnings.push(
+        "新连接会立即占用该网卡；若该网卡承载管理连接或已有连接，执行后管理会话可能中断。".into(),
+    );
+    plan.may_disconnect = true;
+    Ok(plan)
+}
+
+/// op: nm.set_ifname — rebind an existing connection to another NIC (WAN/LAN role swap).
+pub fn nm_set_ifname(state: &Shared, params: &Value) -> Result<Plan, String> {
+    let conn = p_str(params, "connection")?;
+    let ifname = p_str(params, "ifname")?;
+    if !valid_ifname(&ifname) {
+        return Err(format!("非法接口名: {}", ifname));
+    }
+    if !nm_conn_exists(state.mode, &conn) {
+        return Err(format!("连接不存在: {}", conn));
+    }
+    let before = nm_keys(state.mode, &conn)?;
+    let old = before
+        .get("connection.interface-name")
+        .cloned()
+        .unwrap_or_default();
+    if old == ifname {
+        return Err(format!("连接 {} 已绑定 {}", conn, ifname));
+    }
+
+    let mut plan = Plan::new(
+        "nm.set_ifname",
+        &format!("换绑连接 {} 的网卡", conn),
+        "high",
+    );
+    plan.description = format!(
+        "{}: {} → {}",
+        conn,
+        if old.is_empty() { "(未绑定)".into() } else { old.clone() },
+        ifname
+    );
+    plan.risk = "high".into();
+
+    plan.commands.push(CmdStep {
+        argv: util::argv(&[
+            "nmcli", "connection", "modify", &conn,
+            "connection.interface-name", &ifname,
+        ]),
+        desc: format!("绑定 {} → {}", conn, ifname),
+    });
+    plan.commands.push(CmdStep {
+        argv: util::argv(&["nmcli", "connection", "up", &conn]),
+        desc: format!("重新激活 {}", conn),
+    });
+    plan.rollback.push(RollbackStep::NmRestoreKeys {
+        connection: conn.clone(),
+        keys: vec![(
+            "connection.interface-name".into(),
+            old.clone(),
+        )],
+        desc: format!("还原 {} 的网卡绑定", conn),
+    });
+    plan.rollback.push(RollbackStep::Cmd {
+        argv: util::argv(&["nmcli", "connection", "up", &conn]),
+        desc: format!("重新激活 {}", conn),
+    });
+    plan.warnings.push(
+        "换绑会把该连接迁移到另一块网卡（WAN/LAN 角色互换）。原网卡若无其它连接将失去配置，管理链路可能中断。".into(),
+    );
+    plan.may_disconnect = true;
+    Ok(plan)
+}
+
 /// op: nm.update_pppoe — change username/password/service/mtu on existing PPPoE conn.
 pub fn nm_update_pppoe(state: &Shared, params: &Value) -> Result<Plan, String> {
     let conn = p_str(params, "connection")?;
@@ -1682,6 +1846,8 @@ pub fn build_plan(state: &Shared, op: &str, params: &Value) -> Result<Plan, Stri
         "nm.add_route" => nm_add_route(state, params),
         "nm.del_route" => nm_del_route(state, params),
         "nm.create_pppoe" => nm_create_pppoe(state, params),
+        "nm.create_ethernet" => nm_create_ethernet(state, params),
+        "nm.set_ifname" => nm_set_ifname(state, params),
         "nm.update_pppoe" => nm_update_pppoe(state, params),
         "nm.reconnect" => nm_reconnect(state, params),
         "nm.set_link" => nm_set_link(state, params),

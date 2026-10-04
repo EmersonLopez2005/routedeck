@@ -22,8 +22,8 @@ RouteDeck 面向已经跑着 Debian（13 trixie 等）+ NetworkManager/nftables/
 
 | 域 | 内容 |
 |---|---|
-| 总览 | CPU/内存/流量、健康度、接口速览、已识别 WebUI 项目 |
-| 接口 | 实时检测网卡（enp1s0/ens1p0…，**不硬编码**）、NM 连接配置 IP、启用/停用、MTU/克隆 MAC |
+| 总览 | CPU/内存/流量、健康度、接口速览、**访问入口（LAN 地址优先展示）**、已识别 WebUI 项目 |
+| 接口 | 实时检测网卡（enp1s0/ens1p0…，**不硬编码**）、NM 连接配置 IP、启用/停用、MTU/克隆 MAC、**创建以太网（LAN 口/DHCP WAN）**、**换绑网卡（WAN/LAN 角色互换）** |
 | PPPoE | 创建/编辑拨号（账号/密码/ISP 服务名/ppp.mtu）、断线重拨 |
 | 双 WAN | route-metric 出口优先级、never-default |
 | 路由 | 内核路由表/策略规则只读、添加/删除静态路由 |
@@ -54,9 +54,9 @@ sudo ./install.sh                 # 默认端口 8080
 sudo RD_PORT=9090 ./install.sh    # 自定义端口
 ```
 
-打开 `http://<路由器IP>:8080/`，首屏是只读检测报告。
+安装完成后会直接打印 **LAN 口访问入口**（`http://<LAN IP>:8080/`），面板总览页也有「访问入口」条。
 
-> 截图（mock 模式）：[接口页](dist/ui-interfaces.png) · [DHCP](dist/ui-dhcp.png) · [NAT](dist/ui-nat.png)
+> 截图（mock 模式）：[总览页](dist/ui-overview.png) · [接口页](dist/ui-interfaces.png) · [DHCP](dist/ui-dhcp.png) · [NAT](dist/ui-nat.png)
 
 ```bash
 journalctl -u routedeck -f        # 日志

@@ -46,9 +46,20 @@ systemctl daemon-reload
 systemctl enable routedeck >/dev/null 2>&1 || true
 systemctl restart routedeck
 
+# ---- WebUI 入口：优先打印 LAN 口地址（家庭路由场景入口） ----
+wan_dev="$(ip -4 route show default 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i=="dev"){print $(i+1); exit}}')"
+lan_ip="$(ip -4 -o addr show scope global 2>/dev/null | awk -v w="$wan_dev" '{split($4,a,"/"); if($2!=w){print a[1]; exit}}')"
+[[ -z "$lan_ip" ]] && lan_ip="$(ip -4 -o addr show scope global 2>/dev/null | awk '{split($4,a,"/"); print a[1]; exit}')"
+wan_ip="$(ip -4 -o addr show scope global 2>/dev/null | awk -v w="$wan_dev" '{split($4,a,"/"); if($2==w){print a[1]; exit}}')"
+
 echo
 echo "==> RouteDeck 已安装"
-echo "    URL:      http://<本机IP>:${PORT}/"
+if [[ -n "$lan_ip" ]]; then
+  echo "    访问入口（LAN，推荐）: http://${lan_ip}:${PORT}/"
+else
+  echo "    访问入口: http://<本机IP>:${PORT}/"
+fi
+[[ -n "$wan_ip" && "$wan_ip" != "$lan_ip" ]] && echo "    WAN 地址（仅远程管理）: http://${wan_ip}:${PORT}/"
 echo "    数据/备份: ${DATA_DIR}   （审计 audit.jsonl、文件备份）"
 echo "    查看日志: journalctl -u routedeck -f"
 echo "    卸载:     sudo ./uninstall.sh"
